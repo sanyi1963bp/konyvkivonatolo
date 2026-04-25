@@ -1,0 +1,123 @@
+{
+  "window": {
+    "width": 1924,
+    "height": 991,
+    "x": 0,
+    "y": 40,
+    "maximized": true
+  },
+  "theme": "classic_dark",
+  "custom_theme": null,
+  "font": {
+    "family": "Segoe UI",
+    "size": 14,
+    "table_size": 10
+  },
+  "panels": {
+    "details": {
+      "visible": true,
+      "floating": false,
+      "area": "right"
+    },
+    "filters": {
+      "visible": true,
+      "floating": false,
+      "area": "left"
+    },
+    "scraper": {
+      "visible": true,
+      "floating": false,
+      "area": "left"
+    },
+    "stats": {
+      "visible": false,
+      "floating": false,
+      "area": "bottom"
+    },
+    "filter_width": 326,
+    "details_width": 416
+  },
+  "table": {
+    "columns": [
+      {
+        "name": "szerzo",
+        "label": "Szerző",
+        "width": 126,
+        "visible": true
+      },
+      {
+        "name": "cim",
+        "label": "Cím",
+        "width": 250,
+        "visible": true
+      },
+      {
+        "name": "sorozat",
+        "label": "Sorozat",
+        "width": 161,
+        "visible": true
+      },
+      {
+        "name": "sorozat_szama",
+        "label": "#",
+        "width": 103,
+        "visible": true
+      },
+      {
+        "name": "formatum",
+        "label": "Formátum",
+        "width": 70,
+        "visible": true
+      },
+      {
+        "name": "kiadas_eve",
+        "label": "Év",
+        "width": 93,
+        "visible": true
+      },
+      {
+        "name": "meret",
+        "label": "Méret",
+        "width": 80,
+        "visible": true
+      },
+      {
+        "name": "feltoltve_datum",
+        "label": "Feltöltve",
+        "width": 100,
+        "visible": true
+      },
+      {
+        "name": "cimkek",
+        "label": "Címkék",
+        "width": 150,
+        "visible": false
+      }
+    ],
+    "row_height": 28,
+    "alternating_rows": true,
+    "grid_visible": false,
+    "widths": [
+      294,
+      383,
+      115,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  "scraper": {
+    "auto_download_covers": true,
+    "request_delay": 1.0,
+    "max_pages_per_run": 1000
+  },
+  "general": {
+    "confirm_exit": false,
+    "save_window_state": true,
+    "show_cover_tooltips": false,
+    "cover_tooltip_size": 200
+  }
+}

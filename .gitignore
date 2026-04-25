@@ -1,0 +1,41 @@
+# Adatbázis (nagy fájl, személyes adat)
+*.db
+*.db-wal
+*.db-shm
+
+# Borítókép cache (sok kis fájl, letölthető)
+boritos_cache/
+boritok/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+
+# Log és zip fájlok
+*.log
+debug.log
+*.zip
+
+# Meta és eredmény JSON-ok (futás közben generálódnak)
+meta.json
+fazis1_eredmeny.json
+moly_login_debug.html
+
+# Bejelentkezési adatok (SOHA ne kerüljön fel!)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE fájlok
+.vscode/
+.idea/
+*.sublime-project

@@ -1,0 +1,111 @@
+{
+  "foablak": {
+    "szelesseg": 1920,
+    "magassag": 1009,
+    "x_pozicio": 0,
+    "y_pozicio": 71,
+    "maximalizalt": true
+  },
+  "bal_panel": {
+    "lathato": true,
+    "szelesseg": 180,
+    "min_szelesseg": 180
+  },
+  "jobb_panel": {
+    "lathato": true,
+    "szelesseg": 315,
+    "min_szelesseg": 250
+  },
+  "tablazat": {
+    "oszlopok": [
+      {
+        "nev": "ncore_id",
+        "cimke": "Torrent ID",
+        "szelesseg": 86,
+        "lathato": true
+      },
+      {
+        "nev": "szerzo",
+        "cimke": "Szerző",
+        "szelesseg": 270,
+        "lathato": true
+      },
+      {
+        "nev": "cim",
+        "cimke": "Cím",
+        "szelesseg": 382,
+        "lathato": true
+      },
+      {
+        "nev": "sorozat",
+        "cimke": "Sorozat",
+        "szelesseg": 135,
+        "lathato": true
+      },
+      {
+        "nev": "sorozat_szama",
+        "cimke": "#",
+        "szelesseg": 50,
+        "lathato": true
+      },
+      {
+        "nev": "formatum",
+        "cimke": "Formátum",
+        "szelesseg": 80,
+        "lathato": true
+      },
+      {
+        "nev": "kiadas_eve",
+        "cimke": "Év",
+        "szelesseg": 60,
+        "lathato": true
+      },
+      {
+        "nev": "meret",
+        "cimke": "Méret",
+        "szelesseg": 143,
+        "lathato": true
+      },
+      {
+        "nev": "feltoltve_datum",
+        "cimke": "Feltöltve",
+        "szelesseg": 235,
+        "lathato": true
+      },
+      {
+        "nev": "cimkek",
+        "cimke": "Címkék",
+        "szelesseg": 150,
+        "lathato": false
+      }
+    ],
+    "sor_magassag": 28,
+    "valtakozo_sorok": true,
+    "racs_lathato": false
+  },
+  "lapozas": {
+    "oldalmeret": 500,
+    "csuszka_magassag": 38
+  },
+  "gombok": {
+    "frissites": "🔄 Frissítés",
+    "kijeloltek_letoltese": "📥 Kijelöltek letöltése",
+    "mind_kijelelese": "☑ Mind kijelölése",
+    "uj_konyvek": "🚀 Új könyvek",
+    "teljes_scan": "📜 Teljes scan",
+    "beallitasok": "⚙️ Beállítások"
+  },
+  "csuszka_stilus": {
+    "groove_szin": "#333",
+    "groove_magassag": 16,
+    "handle_szin": "#ff6b35",
+    "handle_keret_szin": "#fff",
+    "handle_meret": 32,
+    "handle_keret_vastagsag": 3
+  },
+  "altalanos": {
+    "cache_hasznalat": true,
+    "rendezes_oszlop": "feltoltve_datum",
+    "rendezes_csokkeno": true
+  }
+}
