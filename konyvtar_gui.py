@@ -12,8 +12,9 @@ Futtatás:
   python konyvtar_gui.py
 """
 
-import sys, os, sqlite3, json, shutil, threading
+import sys, os, sqlite3, json, shutil, threading, csv
 from pathlib import Path
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -42,8 +43,9 @@ except ImportError:
 
 DB_PATH    = r"H:\________________2026 FEjlesztesek\Ncore bővítés\ncore_konyvtar.db"
 META_PATH  = r"H:\________________2026 FEjlesztesek\Ncore bővítés\meta.json"
-COVER_DIR  = Path(r"H:\________________2026 FEjlesztesek\Ncore bővítés\boritos_cache")
-OLLAMA_URL = "http://localhost:11434"
+COVER_DIR      = Path(r"H:\________________2026 FEjlesztesek\Ncore bővítés\boritos_cache")
+HISTORY_PATH   = Path(r"H:\________________2026 FEjlesztesek\Ncore bővítés\kereses_elozmenyek.json")
+OLLAMA_URL     = "http://localhost:11434"
 PAGE_SIZE  = 48
 CARD_W     = 155
 CARD_H     = 245
@@ -174,6 +176,21 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA cache_size=10000")
         self._lock = threading.Lock()
+        self._init_user_tables()
+
+    def _init_user_tables(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS felhasznalo_adatok (
+                konyv_id        INTEGER PRIMARY KEY,
+                statusz         TEXT,
+                sajat_ertekeles INTEGER,
+                megjegyzes      TEXT,
+                letrehozva      TEXT,
+                modositva       TEXT,
+                FOREIGN KEY (konyv_id) REFERENCES konyvek(id)
+            );
+        """)
+        self.conn.commit()
 
     def query(self, sql, params=()):
         with self._lock:
@@ -183,9 +200,67 @@ class DB:
         with self._lock:
             return self.conn.execute(sql, params).fetchone()
 
+    def set_user_data(self, konyv_id: int, statusz: str = None,
+                      ertekeles: int = None, megjegyzes: str = None):
+        """Olvasási státusz és/vagy értékelés mentése."""
+        now = datetime.now().isoformat()
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT * FROM felhasznalo_adatok WHERE konyv_id=?",
+                (konyv_id,)).fetchone()
+            if existing:
+                fields, vals = [], []
+                if statusz  is not None: fields.append("statusz=?");         vals.append(statusz)
+                if ertekeles is not None: fields.append("sajat_ertekeles=?"); vals.append(ertekeles)
+                if megjegyzes is not None: fields.append("megjegyzes=?");    vals.append(megjegyzes)
+                fields.append("modositva=?"); vals.append(now)
+                vals.append(konyv_id)
+                self.conn.execute(
+                    f"UPDATE felhasznalo_adatok SET {', '.join(fields)} WHERE konyv_id=?",
+                    vals)
+            else:
+                self.conn.execute("""
+                    INSERT INTO felhasznalo_adatok
+                    (konyv_id, statusz, sajat_ertekeles, megjegyzes, letrehozva, modositva)
+                    VALUES (?,?,?,?,?,?)
+                """, (konyv_id, statusz, ertekeles, megjegyzes, now, now))
+            self.conn.commit()
+
+    def get_user_data(self, konyv_id: int) -> dict:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM felhasznalo_adatok WHERE konyv_id=?",
+                (konyv_id,)).fetchone()
+        return dict(row) if row else {}
+
     def close(self):
         self.conn.close()
         DB._inst = None
+
+
+CALIBRE_VIEWER = r"C:\Program Files\Calibre2\ebook-viewer.exe"
+
+def open_book(book: dict):
+    """Dupla kattintásra megnyitja a könyvet Calibre-rel vagy alapértelmezett programmal."""
+    import subprocess
+    fajl = book.get('fajl_utvonal')
+    if not fajl:
+        QMessageBox.information(
+            None, "Nincs fájl",
+            f"Ehhez a könyvhöz nincs letöltött fájl.\n\n"
+            f"{book.get('cim', '')}")
+        return
+    if not os.path.exists(fajl):
+        QMessageBox.warning(
+            None, "Fájl nem található",
+            f"A fájl nem létezik vagy áthelyezték:\n{fajl}")
+        return
+    # Calibre-rel próbálunk először
+    if os.path.exists(CALIBRE_VIEWER):
+        subprocess.Popen([CALIBRE_VIEWER, fajl])
+    else:
+        # Rendszer alapértelmezett program
+        os.startfile(fajl)
 
 
 def build_sql(filters: dict, page: int):
@@ -217,11 +292,23 @@ def build_sql(filters: dict, page: int):
         w.append("k.szerzo LIKE ?")
         p.append(f"%{filters['szerzo']}%")
 
+    # Felhasználói olvasási státusz szűrő
+    user_st = filters.get('user_statusz')
+    if user_st == 'olvasni_akarom':
+        w.append("u.statusz = 'olvasni_akarom'")
+    elif user_st == 'olvasom':
+        w.append("u.statusz = 'olvasom'")
+    elif user_st == 'elolvastam':
+        w.append("u.statusz = 'elolvastam'")
+    elif user_st == 'ertekelt':
+        w.append("u.sajat_ertekeles IS NOT NULL")
+
     where = ("WHERE " + " AND ".join(w)) if w else ""
     base = f"""
         FROM konyvek k
         LEFT JOIN fizikai_fajlok f ON f.konyv_id = k.id
         LEFT JOIN moly_adatok m ON m.konyv_id = k.id
+        LEFT JOIN felhasznalo_adatok u ON u.konyv_id = k.id
         {where}
     """
     cnt = f"SELECT COUNT(DISTINCT k.id) {base}"
@@ -230,7 +317,8 @@ def build_sql(filters: dict, page: int):
             k.id, k.cim, k.szerzo, k.kiado, k.kiadas_eve,
             k.kep_utvonal, k.leiras, k.cimkek, k.sorozat, k.isbn,
             f.fajl_utvonal, f.formatum, f.egyezes_szint,
-            m.ertekeles, m.moly_url
+            m.ertekeles, m.moly_url,
+            u.statusz as user_statusz, u.sajat_ertekeles
         {base}
         ORDER BY k.cim
         LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
@@ -422,6 +510,19 @@ class BookCard(QWidget):
         al.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         lay.addWidget(al)
 
+        # Olvasási státusz + saját értékelés sor
+        bot = QHBoxLayout()
+        bot.setContentsMargins(0, 0, 0, 0)
+        self.status_icon = QLabel("")
+        self.status_icon.setStyleSheet("font-size:12px;")
+        bot.addWidget(self.status_icon)
+        bot.addStretch()
+        self.stars_lbl = QLabel("")
+        self.stars_lbl.setStyleSheet("font-size:10px; color:#f39c12;")
+        bot.addWidget(self.stars_lbl)
+        lay.addLayout(bot)
+        self._refresh_user_data()
+
     def _set_placeholder(self):
         self.cover.setPixmap(self.placeholder().scaled(
             COVER_W, COVER_H,
@@ -433,6 +534,13 @@ class BookCard(QWidget):
             COVER_W, COVER_H,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation))
+
+    def _refresh_user_data(self):
+        st = self.book.get('user_statusz')
+        icons = {'olvasni_akarom': '📖', 'olvasom': '📚', 'elolvastam': '✅'}
+        self.status_icon.setText(icons.get(st, ''))
+        n = self.book.get('sajat_ertekeles') or 0
+        self.stars_lbl.setText('★' * n if n else '')
 
     def set_selected(self, v: bool):
         self._sel = v
@@ -449,6 +557,10 @@ class BookCard(QWidget):
     def mousePressEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.book)
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            open_book(self.book)
 
     def paintEvent(self, ev):
         p = QPainter(self)
@@ -485,6 +597,7 @@ class FilterPanel(QWidget):
         self.meta = meta
         self.setFixedWidth(224)
         self.setStyleSheet("background: #16162a;")
+        self._history = self._load_history()
         self._build()
 
     def _section(self, text: str, lay):
@@ -504,11 +617,19 @@ class FilterPanel(QWidget):
         h.setStyleSheet("font-size:16px; font-weight:bold; color:#e94560; padding-bottom:6px;")
         lay.addWidget(h)
 
-        # Keresés
+        # Keresés + előzmények
         self.search = QLineEdit()
         self.search.setPlaceholderText("🔍 Cím vagy szerző...")
-        self.search.textChanged.connect(lambda _: self._emit())
+        self.search.textChanged.connect(self._on_search_changed)
+        self.search.returnPressed.connect(self._save_search)
         lay.addWidget(self.search)
+
+        # Előzmény lista (rejtett, kereséskor jelenik meg)
+        self.history_list = QListWidget()
+        self.history_list.setMaximumHeight(120)
+        self.history_list.setVisible(False)
+        self.history_list.itemClicked.connect(self._pick_history)
+        lay.addWidget(self.history_list)
 
         # Státusz
         self._section("STÁTUSZ", lay)
@@ -531,6 +652,28 @@ class FilterPanel(QWidget):
             grid.addWidget(b, i // 2, i % 2)
         lay.addLayout(grid)
         self.status_grp.buttonClicked.connect(lambda _: self._emit())
+
+        # Olvasási státusz
+        self._section("OLVASÁSI LISTA", lay)
+        self.user_grp = QButtonGroup(self)
+        self.user_grp.setExclusive(True)
+        user_statuszok = [
+            ("Mind", ""),
+            ("📖 Olvasni akarom", "olvasni_akarom"),
+            ("📚 Olvasom", "olvasom"),
+            ("✅ Elolvastam", "elolvastam"),
+            ("⭐ Értékeltem", "ertekelt"),
+        ]
+        for i, (lbl, val) in enumerate(user_statuszok):
+            b = QPushButton(lbl)
+            b.setCheckable(True)
+            b.setProperty('uval', val)
+            b.setFixedHeight(26)
+            if val == "":
+                b.setChecked(True)
+            self.user_grp.addButton(b, i)
+            lay.addWidget(b)
+        self.user_grp.buttonClicked.connect(lambda _: self._emit())
 
         # Formátum
         self._section("FORMÁTUM", lay)
@@ -596,12 +739,62 @@ class FilterPanel(QWidget):
 
     def _reset(self):
         self.search.clear()
+        self.history_list.setVisible(False)
         self.status_grp.buttons()[0].setChecked(True)
+        self.user_grp.buttons()[0].setChecked(True)
         for cb in self.fmt_cbs.values():
             cb.setChecked(False)
         self.tag_list.setCurrentRow(0)
         self.author_list.setCurrentRow(0)
         self._emit()
+
+    def _on_search_changed(self, text: str):
+        self._emit()
+        # Előzmények megjelenítése ha van szöveg
+        if text.strip():
+            matches = [h for h in self._history
+                       if text.lower() in h.lower()][:6]
+            self.history_list.clear()
+            if matches:
+                for m in matches:
+                    self.history_list.addItem(m)
+                self.history_list.setVisible(True)
+            else:
+                self.history_list.setVisible(False)
+        else:
+            # Üres keresőnél mutassuk az összes előzményt
+            self.history_list.clear()
+            for h in self._history[:8]:
+                self.history_list.addItem(h)
+            self.history_list.setVisible(bool(self._history))
+
+    def _pick_history(self, item):
+        self.search.setText(item.text())
+        self.history_list.setVisible(False)
+
+    def _save_search(self):
+        text = self.search.text().strip()
+        if not text or len(text) < 2:
+            return
+        if text in self._history:
+            self._history.remove(text)
+        self._history.insert(0, text)
+        self._history = self._history[:20]
+        self.history_list.setVisible(False)
+        try:
+            HISTORY_PATH.write_text(
+                json.dumps(self._history, ensure_ascii=False, indent=2),
+                encoding='utf-8')
+        except Exception:
+            pass
+
+    def _load_history(self) -> list:
+        try:
+            if HISTORY_PATH.exists():
+                return json.loads(HISTORY_PATH.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+        return []
 
     def _emit(self):
         f = {}
@@ -620,6 +813,11 @@ class FilterPanel(QWidget):
         ai = self.author_list.currentRow()
         if ai > 0:
             f['szerzo'] = self.author_list.item(ai).text().rsplit('  (', 1)[0]
+        ub = self.user_grp.checkedButton()
+        if ub:
+            uval = ub.property('uval')
+            if uval:
+                f['user_statusz'] = uval
         self.changed.emit(f)
 
 
@@ -672,6 +870,11 @@ class BookGrid(QWidget):
         self.sel_lbl = QLabel("")
         self.sel_lbl.setStyleSheet("color:#e94560; font-size:12px; font-weight:bold;")
         bl.addWidget(self.sel_lbl)
+
+        exp_btn = QPushButton("📥 Export CSV")
+        exp_btn.setFixedHeight(30)
+        exp_btn.clicked.connect(self._export_csv)
+        bl.addWidget(exp_btn)
 
         root.addWidget(bar)
 
@@ -799,6 +1002,49 @@ class BookGrid(QWidget):
                 item.widget().deleteLater()
         self.cards.clear()
 
+    def _export_csv(self):
+        """Kijelölt (vagy szűrt összes) könyv exportálása CSV-be."""
+        books_to_export = list(self.selected.values())
+
+        if not books_to_export:
+            # Ha nincs kijelölve semmi, az összes szűrt könyvet exportáljuk
+            reply = QMessageBox.question(
+                self, "Export",
+                f"Nincs kijelölt könyv.\nExportálod az összes szűrt könyvet? ({self.total:,} db)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            # Lekérjük az összes szűrt könyvet
+            db = DB.get()
+            sel, p, _, _ = build_sql(self.filters, 0)
+            # Limit nélkül
+            sel_all = sel.replace(
+                f"LIMIT {PAGE_SIZE} OFFSET 0", f"LIMIT 99999 OFFSET 0")
+            rows = db.query(sel_all, p)
+            books_to_export = [dict(r) for r in rows]
+
+        # Fájlnév
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = Path(DB_PATH).parent / f"export_{ts}.csv"
+
+        mezok = ['id', 'cim', 'szerzo', 'kiado', 'kiadas_eve',
+                 'isbn', 'sorozat', 'cimkek', 'formatum',
+                 'egyezes_szint', 'fajl_utvonal',
+                 'ertekeles', 'user_statusz', 'sajat_ertekeles']
+
+        try:
+            with open(dest, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=mezok,
+                                        extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(books_to_export)
+
+            QMessageBox.information(
+                self, "Export kész",
+                f"✅ {len(books_to_export):,} könyv exportálva:\n{dest}")
+        except Exception as e:
+            QMessageBox.warning(self, "Hiba", f"Export sikertelen:\n{e}")
+
     def _prev(self):
         if self.page > 0:
             self.load(self.filters, self.page - 1)
@@ -878,16 +1124,110 @@ class BookDetailPanel(QWidget):
         top.addLayout(info, 1)
         lay.addLayout(top)
 
+        # ── Olvasási státusz gombok ──
+        st_row = QHBoxLayout()
+        st_row.setSpacing(4)
+        self.st_grp = QButtonGroup(self)
+        self.st_grp.setExclusive(True)
+        self._st_btns = {}
+        for lbl, val, col in [
+            ("📖 Olvasni akarom", "olvasni_akarom", "#2980b9"),
+            ("📚 Olvasom",        "olvasom",        "#8e44ad"),
+            ("✅ Elolvastam",     "elolvastam",     "#27ae60"),
+        ]:
+            b = QPushButton(lbl)
+            b.setCheckable(True)
+            b.setFixedHeight(28)
+            b.setProperty('stval', val)
+            b.setStyleSheet(
+                f"QPushButton:checked {{ background:{col}; border-color:{col}; color:white; }}")
+            self.st_grp.addButton(b)
+            self._st_btns[val] = b
+            st_row.addWidget(b)
+
+        clear_btn = QPushButton("✕")
+        clear_btn.setFixedSize(28, 28)
+        clear_btn.setToolTip("Státusz törlése")
+        clear_btn.clicked.connect(self._clear_status)
+        st_row.addWidget(clear_btn)
+        lay.addLayout(st_row)
+        self.st_grp.buttonClicked.connect(self._on_status_click)
+
+        # ── Saját értékelés (csillagok) ──
+        star_row = QHBoxLayout()
+        star_row.setSpacing(2)
+        star_row.addWidget(QLabel("Saját értékelés:"))
+        self._star_btns = []
+        for i in range(1, 6):
+            sb = QPushButton("☆")
+            sb.setFixedSize(28, 28)
+            sb.setProperty('stars', i)
+            sb.setStyleSheet(
+                "QPushButton { font-size:16px; border:none; background:transparent; color:#f39c12; }"
+                "QPushButton:hover { color:#e67e22; }")
+            sb.clicked.connect(self._on_star_click)
+            self._star_btns.append(sb)
+            star_row.addWidget(sb)
+        self._cur_stars = 0
+        star_row.addStretch()
+        lay.addLayout(star_row)
+
         # Leírás
         self.desc = QTextEdit()
         self.desc.setReadOnly(True)
-        self.desc.setMaximumHeight(110)
+        self.desc.setMaximumHeight(100)
         self.desc.setPlaceholderText("Leírás...")
         lay.addWidget(self.desc)
 
+    def _on_status_click(self, btn):
+        if not self.current_book:
+            return
+        DB.get().set_user_data(
+            self.current_book['id'],
+            statusz=btn.property('stval'))
+
+    def _clear_status(self):
+        if not self.current_book:
+            return
+        self.st_grp.setExclusive(False)
+        for b in self.st_grp.buttons():
+            b.setChecked(False)
+        self.st_grp.setExclusive(True)
+        DB.get().set_user_data(self.current_book['id'], statusz=None)
+
+    def _on_star_click(self):
+        btn = self.sender()
+        stars = btn.property('stars')
+        # Ha ugyanazt kattintod = töröl
+        if stars == self._cur_stars:
+            stars = 0
+        self._set_stars(stars)
+        if self.current_book:
+            DB.get().set_user_data(
+                self.current_book['id'],
+                ertekeles=stars if stars > 0 else None)
+
+    def _set_stars(self, n: int):
+        self._cur_stars = n
+        for sb in self._star_btns:
+            sb.setText("★" if sb.property('stars') <= n else "☆")
+
     def show_book(self, book: dict):
+        self.current_book = book
         self.title_lbl.setText(book.get('cim') or 'Ismeretlen cím')
         self.author_lbl.setText(book.get('szerzo') or '')
+
+        # Felhasználói adatok betöltése DB-ből
+        ud = DB.get().get_user_data(book['id'])
+        self.st_grp.setExclusive(False)
+        for b in self.st_grp.buttons():
+            b.setChecked(False)
+        self.st_grp.setExclusive(True)
+        saved_st = ud.get('statusz') or book.get('user_statusz')
+        if saved_st and saved_st in self._st_btns:
+            self._st_btns[saved_st].setChecked(True)
+        saved_stars = ud.get('sajat_ertekeles') or book.get('sajat_ertekeles') or 0
+        self._set_stars(saved_stars)
 
         parts = []
         if book.get('kiado'):      parts.append(book['kiado'])
