@@ -12,7 +12,7 @@ Futtatás:
   python konyvtar_gui.py
 """
 
-import sys, os, sqlite3, json, shutil, threading, csv
+import sys, os, sqlite3, json, shutil, threading, csv, re
 from pathlib import Path
 from datetime import datetime
 
@@ -271,6 +271,21 @@ class DB:
 
 CALIBRE_VIEWER = r"C:\Program Files\Calibre2\ebook-viewer.exe"
 
+def _extract_volume(cim: str) -> int:
+    """Kötetszám kinyerése a cím szövegéből rendezéshez."""
+    if not cim:
+        return 999
+    # Végén: "3.", "- 3", "#3", "(3)"
+    m = re.search(r'[\s\-#(](\d{1,3})[.)]*\s*$', cim)
+    if m:
+        return int(m.group(1))
+    # Elején: "3. kötet", "3 -"
+    m = re.search(r'^(\d{1,3})[.\s]', cim)
+    if m:
+        return int(m.group(1))
+    return 999
+
+
 def open_book(book: dict):
     """Dupla kattintásra megnyitja a könyvet Calibre-rel vagy alapértelmezett programmal."""
     import subprocess
@@ -322,6 +337,10 @@ def build_sql(filters: dict, page: int):
     if filters.get('szerzo'):
         w.append("k.szerzo LIKE ?")
         p.append(f"%{filters['szerzo']}%")
+
+    if filters.get('sorozat'):
+        w.append("k.sorozat = ?")
+        p.append(filters['sorozat'])
 
     # Felhasználói olvasási státusz szűrő
     user_st = filters.get('user_statusz')
@@ -760,6 +779,7 @@ class ShelfWidget(QWidget):
 
 class FilterPanel(QWidget):
     changed = pyqtSignal(dict)
+    _active_sorozat: str = ""   # aktív sorozatszűrő
 
     def __init__(self, meta: dict, parent=None):
         super().__init__(parent)
@@ -906,7 +926,15 @@ class FilterPanel(QWidget):
             row.addStretch()
             lay.addLayout(row)
 
+    def set_series_filter(self, sorozat: str):
+        """Sorozat-szűrő beállítása kívülről (sorozat-csík 'Mutasd mind' gombja)."""
+        self._active_sorozat = sorozat
+        self.search.clear()
+        self.history_list.setVisible(False)
+        self._emit()
+
     def _reset(self):
+        self._active_sorozat = ""
         self.search.clear()
         self.history_list.setVisible(False)
         self.status_grp.buttons()[0].setChecked(True)
@@ -987,6 +1015,8 @@ class FilterPanel(QWidget):
             uval = ub.property('uval')
             if uval:
                 f['user_statusz'] = uval
+        if self._active_sorozat:
+            f['sorozat'] = self._active_sorozat
         self.changed.emit(f)
 
 
@@ -1270,9 +1300,13 @@ class BookGrid(QWidget):
 # ══════════════════════════════════════════════════════════════
 
 class BookDetailPanel(QWidget):
+    book_selected          = pyqtSignal(dict)   # sorozatból kattintott könyv
+    series_filter_requested = pyqtSignal(str)   # "Mutasd mind" sorozatszűrő
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cover_worker = None
+        self.current_book  = None
         self._build()
 
     def _build(self):
@@ -1519,16 +1553,19 @@ class BookDetailPanel(QWidget):
 
     def _load_series(self, current_id: int, sorozat: str):
         rows = DB.get().query("""
-            SELECT k.id, k.cim, k.kiadas_eve,
-                   f.id as fajl_id, f.egyezes_szint,
-                   u.statusz as user_statusz
+            SELECT k.id, k.cim, k.szerzo, k.kiadas_eve,
+                   k.kep_utvonal, k.leiras, k.cimkek,
+                   k.sorozat, k.kiado, k.isbn,
+                   f.id as fajl_id, f.fajl_utvonal, f.formatum, f.egyezes_szint,
+                   m.ertekeles, m.moly_url,
+                   u.statusz as user_statusz, u.sajat_ertekeles
             FROM konyvek k
             LEFT JOIN fizikai_fajlok f ON f.konyv_id = k.id
+            LEFT JOIN moly_adatok m    ON m.konyv_id = k.id
             LEFT JOIN felhasznalo_adatok u ON u.konyv_id = k.id
             WHERE k.sorozat = ?
             GROUP BY k.id
-            ORDER BY k.kiadas_eve, k.cim
-            LIMIT 24
+            LIMIT 40
         """, (sorozat,))
 
         # Törlés
@@ -1541,52 +1578,108 @@ class BookDetailPanel(QWidget):
             self.series_box.setVisible(False)
             return
 
+        # Kötetszám szerinti rendezés
+        books = [dict(r) for r in rows]
+        books.sort(key=lambda b: (_extract_volume(b.get('cim', '')),
+                                   b.get('kiadas_eve') or 9999))
+
+        # Statisztika
+        van_meg   = sum(1 for b in books if b.get('fajl_id'))
+        elolvasva = sum(1 for b in books if b.get('user_statusz') == 'elolvastam')
+        olvasom   = sum(1 for b in books if b.get('user_statusz') == 'olvasom')
+        stat_parts = [f"{len(books)} kötet"]
+        if van_meg:   stat_parts.append(f"{van_meg} megvan")
+        if elolvasva: stat_parts.append(f"✅ {elolvasva} elolvasva")
+        if olvasom:   stat_parts.append(f"📚 {olvasom} olvasom")
+
         self.series_title.setText(
-            f"📚 Sorozat: {sorozat}  ({len(rows)} kötet)")
+            f"📚 {sorozat}   "
+            f"<span style='color:#778; font-weight:normal; font-size:10px;'>"
+            f"{'  •  '.join(stat_parts)}</span>")
+        self.series_title.setTextFormat(Qt.TextFormat.RichText)
 
-        st_icons = {
-            'olvasni_akarom': '📖',
-            'olvasom':        '📚',
-            'elolvastam':     '✅',
-        }
-        for row in rows:
-            row = dict(row)
-            is_current = (row['id'] == current_id)
+        st_icons = {'olvasni_akarom': '📖', 'olvasom': '📚', 'elolvastam': '✅'}
 
-            item = QWidget()
-            item.setFixedWidth(108)
-            item.setStyleSheet(
-                f"background: {'#252550' if is_current else '#1a1a30'};"
-                "border-radius:5px;")
-            il = QVBoxLayout(item)
-            il.setContentsMargins(5, 5, 5, 5)
-            il.setSpacing(2)
+        for vol_idx, book in enumerate(books, 1):
+            is_current = (book['id'] == current_id)
+            book_copy  = dict(book)
 
-            # Cím
-            szint = row.get('egyezes_szint')
-            col   = STATUS_COL.get(szint, NO_FILE_COL) if row.get('fajl_id') else NO_FILE_COL
-            cim   = (row.get('cim') or '')[:22]
-            cim_lbl = QLabel(cim)
+            card = QWidget()
+            card.setFixedWidth(112)
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            fajl_tip = '✓ Megvan' if book.get('fajl_id') else '– Nincs letöltve'
+            card.setToolTip(
+                f"{book.get('cim', '')}\n{fajl_tip}\nKattints a megnyitáshoz")
+            card.mousePressEvent = (
+                lambda ev, b=book_copy: self._on_series_book_click(b)
+                if ev.button() == Qt.MouseButton.LeftButton else None)
+
+            bg = '#252550' if is_current else '#1a1a30'
+            card.setStyleSheet(
+                f"QWidget {{ background:{bg}; border-radius:5px; }}"
+                "QWidget:hover { background:#2a2a60; }")
+
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(5, 5, 5, 5)
+            cl.setSpacing(2)
+
+            # Kötetszám badge + státusz ikon
+            szint   = book.get('egyezes_szint')
+            col     = (STATUS_COL.get(szint, NO_FILE_COL)
+                       if book.get('fajl_id') else NO_FILE_COL)
+            vol_n   = _extract_volume(book.get('cim', ''))
+            vol_str = str(vol_n) if vol_n < 999 else str(vol_idx)
+
+            top_row = QHBoxLayout()
+            top_row.setContentsMargins(0, 0, 0, 0)
+            top_row.setSpacing(4)
+            vol_lbl = QLabel(vol_str)
+            vol_lbl.setFixedSize(18, 18)
+            vol_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vol_lbl.setStyleSheet(
+                f"background:{col}; color:white; font-size:9px; "
+                "font-weight:bold; border-radius:9px;")
+            top_row.addWidget(vol_lbl)
+            top_row.addStretch()
+            st_icon = st_icons.get(book.get('user_statusz', ''), '')
+            if st_icon:
+                si = QLabel(st_icon)
+                si.setStyleSheet("font-size:11px;")
+                top_row.addWidget(si)
+            cl.addLayout(top_row)
+
+            cim_lbl = QLabel((book.get('cim') or '')[:24])
             cim_lbl.setWordWrap(True)
-            cim_lbl.setFixedHeight(38)
+            cim_lbl.setFixedHeight(36)
             bold = "font-weight:bold;" if is_current else ""
-            cim_lbl.setStyleSheet(
-                f"font-size:10px; {bold} color:#dde1ec; "
-                f"border-left:3px solid {col}; padding-left:4px;")
-            il.addWidget(cim_lbl)
+            cim_lbl.setStyleSheet(f"font-size:10px; {bold} color:#dde1ec;")
+            cl.addWidget(cim_lbl)
 
-            # Státusz + fájl jelző
-            ev_txt = str(row['kiadas_eve']) if row.get('kiadas_eve') else ''
-            fajl_jel = '✓' if row.get('fajl_id') else '–'
-            st_icon  = st_icons.get(row.get('user_statusz', ''), '')
-            info_lbl = QLabel(f"{fajl_jel} {ev_txt}  {st_icon}")
+            ev_txt   = str(book['kiadas_eve']) if book.get('kiadas_eve') else ''
+            fajl_jel = '✓' if book.get('fajl_id') else '–'
+            info_lbl = QLabel(f"{fajl_jel}  {ev_txt}")
             info_lbl.setStyleSheet("font-size:10px; color:#778;")
-            il.addWidget(info_lbl)
+            cl.addWidget(info_lbl)
 
-            self.series_row.addWidget(item)
+            self.series_row.addWidget(card)
 
+        # "Mutasd mind" gomb a végén
+        all_btn = QPushButton("→ Mind")
+        all_btn.setFixedSize(60, 70)
+        all_btn.setStyleSheet(
+            "QPushButton { background:#1a1a30; border:1px solid #2a2a50; "
+            "border-radius:5px; font-size:10px; color:#aab; }"
+            "QPushButton:hover { background:#e94560; color:white; border-color:#e94560; }")
+        all_btn.setToolTip(f"Mutasd a sorozat összes kötetét a főlistában")
+        all_btn.clicked.connect(lambda: self.series_filter_requested.emit(sorozat))
+        self.series_row.addWidget(all_btn)
         self.series_row.addStretch()
         self.series_box.setVisible(True)
+
+    def _on_series_book_click(self, book: dict):
+        """Sorozat-csíkban kattintott könyv megnyitása."""
+        self.show_book(book)
+        self.book_selected.emit(book)
 
     def _on_star_click(self):
         btn = self.sender()
@@ -2166,6 +2259,10 @@ class MainWindow(QMainWindow):
         self.filters.changed.connect(self._on_filter)
         self.grid.book_clicked.connect(self.right.show_book)
         self.grid.selection_changed.connect(self.right.set_selected)
+        # Sorozat-nézet jelei
+        self.right.detail.book_selected.connect(self.right.show_book)
+        self.right.detail.series_filter_requested.connect(
+            self.filters.set_series_filter)
 
         # Státuszsor info
         n = meta.get('osszes_konyv', 0)
