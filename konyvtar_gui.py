@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QCheckBox, QButtonGroup,
     QListWidget, QComboBox, QScrollArea, QTextEdit,
     QTreeView, QProgressBar, QInputDialog, QMessageBox,
-    QSizePolicy, QFrame
+    QSizePolicy, QFrame, QSpinBox, QStackedWidget
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QDir, QSize, QTimer
@@ -190,6 +190,18 @@ class DB:
                 FOREIGN KEY (konyv_id) REFERENCES konyvek(id)
             );
         """)
+        # Haladás mezők migrálása (régebbi DB-knél még nem léteznek)
+        for col, coltype in [
+            ('olvasas_kezdete', 'TEXT'),
+            ('olvasas_vege',    'TEXT'),
+            ('aktualis_oldal',  'INTEGER'),
+            ('osszes_oldal',    'INTEGER'),
+        ]:
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE felhasznalo_adatok ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass  # Már létezik
         self.conn.commit()
 
     def query(self, sql, params=()):
@@ -201,19 +213,34 @@ class DB:
             return self.conn.execute(sql, params).fetchone()
 
     def set_user_data(self, konyv_id: int, statusz: str = None,
-                      ertekeles: int = None, megjegyzes: str = None):
-        """Olvasási státusz és/vagy értékelés mentése."""
+                      ertekeles: int = None, megjegyzes: str = None,
+                      aktualis_oldal: int = None, osszes_oldal: int = None,
+                      olvasas_kezdete: str = None, olvasas_vege: str = None):
+        """Olvasási adatok mentése — csak a nem-None paraméterek frissülnek."""
         now = datetime.now().isoformat()
+        mapping = {
+            'statusz':          statusz,
+            'sajat_ertekeles':  ertekeles,
+            'megjegyzes':       megjegyzes,
+            'aktualis_oldal':   aktualis_oldal,
+            'osszes_oldal':     osszes_oldal,
+            'olvasas_kezdete':  olvasas_kezdete,
+            'olvasas_vege':     olvasas_vege,
+        }
         with self._lock:
             existing = self.conn.execute(
                 "SELECT * FROM felhasznalo_adatok WHERE konyv_id=?",
                 (konyv_id,)).fetchone()
             if existing:
                 fields, vals = [], []
-                if statusz  is not None: fields.append("statusz=?");         vals.append(statusz)
-                if ertekeles is not None: fields.append("sajat_ertekeles=?"); vals.append(ertekeles)
-                if megjegyzes is not None: fields.append("megjegyzes=?");    vals.append(megjegyzes)
-                fields.append("modositva=?"); vals.append(now)
+                for col, val in mapping.items():
+                    if val is not None:
+                        fields.append(f"{col}=?")
+                        vals.append(val)
+                if not fields:
+                    return
+                fields.append("modositva=?")
+                vals.append(now)
                 vals.append(konyv_id)
                 self.conn.execute(
                     f"UPDATE felhasznalo_adatok SET {', '.join(fields)} WHERE konyv_id=?",
@@ -221,9 +248,13 @@ class DB:
             else:
                 self.conn.execute("""
                     INSERT INTO felhasznalo_adatok
-                    (konyv_id, statusz, sajat_ertekeles, megjegyzes, letrehozva, modositva)
-                    VALUES (?,?,?,?,?,?)
-                """, (konyv_id, statusz, ertekeles, megjegyzes, now, now))
+                    (konyv_id, statusz, sajat_ertekeles, megjegyzes,
+                     aktualis_oldal, osszes_oldal, olvasas_kezdete, olvasas_vege,
+                     letrehozva, modositva)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (konyv_id, statusz, ertekeles, megjegyzes,
+                      aktualis_oldal, osszes_oldal, olvasas_kezdete, olvasas_vege,
+                      now, now))
             self.conn.commit()
 
     def get_user_data(self, konyv_id: int) -> dict:
@@ -586,6 +617,144 @@ class BookCard(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════
+# KÖNYVGERINC (POLCNÉZET EGY ELEME)
+# ══════════════════════════════════════════════════════════════
+
+class BookSpine(QWidget):
+    """Egyetlen könyv gerince a polcnézetben."""
+    clicked = pyqtSignal(dict)
+
+    SPINE_W = 38
+    SPINE_H = 190
+
+    def __init__(self, book: dict, parent=None):
+        super().__init__(parent)
+        self.book = book
+        self._selected = False
+        self.setFixedSize(self.SPINE_W, self.SPINE_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        cim   = book.get('cim', '') or ''
+        szerzo = book.get('szerzo', '') or ''
+        self.setToolTip(f"{cim}\n{szerzo}")
+
+    def set_selected(self, v: bool):
+        self._selected = v
+        self.update()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.book)
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            open_book(self.book)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Gerinc alap háttérszín az egyezési szint alapján
+        szint = self.book.get('egyezes_szint')
+        base  = QColor(STATUS_COL.get(szint, NO_FILE_COL))
+        dark  = base.darker(200)
+        p.fillRect(0, 0, self.SPINE_W, self.SPINE_H, dark)
+
+        # Olvasási státusz: bal széli csík
+        st = self.book.get('user_statusz')
+        st_col = {
+            'olvasni_akarom': '#2980b9',
+            'olvasom':        '#8e44ad',
+            'elolvastam':     '#27ae60',
+        }
+        if st in st_col:
+            p.fillRect(0, 0, 5, self.SPINE_H, QColor(st_col[st]))
+
+        # Kijelölés keret
+        if self._selected:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor('#e94560'), 2))
+            p.drawRect(1, 1, self.SPINE_W - 2, self.SPINE_H - 2)
+
+        # Elforgatott cím szöveg (alulról felfelé)
+        p.save()
+        p.translate(self.SPINE_W / 2 + 3, self.SPINE_H - 8)
+        p.rotate(-90)
+        p.setPen(QColor('#dde1ec'))
+        font = QFont('Segoe UI', 8)
+        font.setBold(True)
+        p.setFont(font)
+        cim = (self.book.get('cim') or '')[:38]
+        p.drawText(0, 0, cim)
+        p.restore()
+
+
+# ══════════════════════════════════════════════════════════════
+# POLCNÉZET WIDGET
+# ══════════════════════════════════════════════════════════════
+
+class ShelfWidget(QWidget):
+    """Könyvespolc nézet — sorokba rendezett gerincek."""
+    book_clicked = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._spines  = []
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.shelf_w = QWidget()
+        self.shelf_w.setStyleSheet("background: transparent;")
+        self.shelf_l = QGridLayout(self.shelf_w)
+        self.shelf_l.setSpacing(3)
+        self.shelf_l.setContentsMargins(14, 14, 14, 14)
+        self.scroll.setWidget(self.shelf_w)
+        lay.addWidget(self.scroll, 1)
+
+    def populate(self, books: list, selected_ids: set):
+        # Törlés
+        while self.shelf_l.count():
+            item = self.shelf_l.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._spines.clear()
+
+        vw   = self.scroll.viewport().width()
+        cols = max(1, (vw - 14) // (BookSpine.SPINE_W + 3))
+
+        for i, book in enumerate(books):
+            spine = BookSpine(book)
+            spine.clicked.connect(self.book_clicked)
+            spine.set_selected(book['id'] in selected_ids)
+            r, c = divmod(i, cols)
+            self.shelf_l.addWidget(spine, r, c)
+            self._spines.append(spine)
+
+    def sync_selection(self, selected_ids: set):
+        for sp in self._spines:
+            sp.set_selected(sp.book['id'] in selected_ids)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if not self._spines:
+            return
+        vw   = self.scroll.viewport().width()
+        cols = max(1, (vw - 14) // (BookSpine.SPINE_W + 3))
+        for i, sp in enumerate(self._spines):
+            self.shelf_l.removeWidget(sp)
+            r, c = divmod(i, cols)
+            self.shelf_l.addWidget(sp, r, c)
+
+
+# ══════════════════════════════════════════════════════════════
 # BAL PANEL — SZŰRŐK
 # ══════════════════════════════════════════════════════════════
 
@@ -876,9 +1045,19 @@ class BookGrid(QWidget):
         exp_btn.clicked.connect(self._export_csv)
         bl.addWidget(exp_btn)
 
+        self.view_btn = QPushButton("🗂 Polc")
+        self.view_btn.setFixedHeight(30)
+        self.view_btn.setCheckable(True)
+        self.view_btn.setToolTip("Váltás kártyarács ↔ könyvespolc nézet között")
+        self.view_btn.clicked.connect(self._toggle_view)
+        bl.addWidget(self.view_btn)
+
         root.addWidget(bar)
 
-        # ── Rács ──
+        # ── Stack: Rács ↔ Polc ──
+        self.stack = QStackedWidget()
+
+        # Oldal 0: Kártyarács
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(
@@ -891,7 +1070,14 @@ class BookGrid(QWidget):
         self.grid_l.setContentsMargins(14, 14, 14, 14)
 
         self.scroll.setWidget(self.grid_w)
-        root.addWidget(self.scroll, 1)
+        self.stack.addWidget(self.scroll)
+
+        # Oldal 1: Polcnézet
+        self.shelf = ShelfWidget()
+        self.shelf.book_clicked.connect(self.book_clicked)
+        self.stack.addWidget(self.shelf)
+
+        root.addWidget(self.stack, 1)
 
         # ── Lapozó ──
         pag = QWidget()
@@ -961,11 +1147,26 @@ class BookGrid(QWidget):
         self.info_lbl.setText(
             f"{total:,} könyv  •  {len(books)} megjelenítve az oldalon")
 
+        # Ha polcnézet aktív, azt is frissítjük
+        if self.stack.currentIndex() == 1:
+            self.shelf.populate(books, set(self.selected.keys()))
+
     def _on_cover(self, bid: int, px: QPixmap):
         for c in self.cards:
             if c.book['id'] == bid:
                 c.set_cover(px)
                 break
+
+    def _toggle_view(self, checked: bool):
+        if checked:
+            self.stack.setCurrentIndex(1)
+            self.view_btn.setText("🗂 Rács")
+            self.shelf.populate(
+                [c.book for c in self.cards],
+                set(self.selected.keys()))
+        else:
+            self.stack.setCurrentIndex(0)
+            self.view_btn.setText("🗂 Polc")
 
     def _on_toggle(self, book: dict, sel: bool):
         if sel:
@@ -975,6 +1176,7 @@ class BookGrid(QWidget):
         n = len(self.selected)
         self.sel_lbl.setText(f"{n} kijelölve" if n else "")
         self.selection_changed.emit(list(self.selected.values()))
+        self.shelf.sync_selection(set(self.selected.keys()))
 
     def _select_all(self):
         for c in self.cards:
@@ -1055,13 +1257,12 @@ class BookGrid(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        if not self.cards:
-            return
-        cols = max(1, (self.scroll.viewport().width() - 14) // (CARD_W + 10))
-        for i, card in enumerate(self.cards):
-            self.grid_l.removeWidget(card)
-            r, c = divmod(i, cols)
-            self.grid_l.addWidget(card, r, c)
+        if self.cards:
+            cols = max(1, (self.scroll.viewport().width() - 14) // (CARD_W + 10))
+            for i, card in enumerate(self.cards):
+                self.grid_l.removeWidget(card)
+                r, c = divmod(i, cols)
+                self.grid_l.addWidget(card, r, c)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1172,19 +1373,111 @@ class BookDetailPanel(QWidget):
         star_row.addStretch()
         lay.addLayout(star_row)
 
+        # ── Olvasási haladás (csak "Olvasom" státusznál látható) ──
+        self.progress_box = QWidget()
+        pb_lay = QVBoxLayout(self.progress_box)
+        pb_lay.setContentsMargins(0, 2, 0, 2)
+        pb_lay.setSpacing(4)
+
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(6)
+        prog_row.addWidget(QLabel("📄 Oldal:"))
+        self.cur_page = QSpinBox()
+        self.cur_page.setRange(0, 9999)
+        self.cur_page.setFixedWidth(68)
+        self.cur_page.setStyleSheet(
+            "background:#1e1e3a; border:1px solid #2a2a50; "
+            "border-radius:5px; padding:3px; color:#dde1ec;")
+        prog_row.addWidget(self.cur_page)
+        prog_row.addWidget(QLabel("/"))
+        self.tot_page = QSpinBox()
+        self.tot_page.setRange(0, 9999)
+        self.tot_page.setFixedWidth(68)
+        self.tot_page.setStyleSheet(
+            "background:#1e1e3a; border:1px solid #2a2a50; "
+            "border-radius:5px; padding:3px; color:#dde1ec;")
+        prog_row.addWidget(self.tot_page)
+        save_prog = QPushButton("💾")
+        save_prog.setFixedSize(28, 28)
+        save_prog.setToolTip("Haladás mentése")
+        save_prog.clicked.connect(self._save_progress)
+        prog_row.addWidget(save_prog)
+        prog_row.addStretch()
+        pb_lay.addLayout(prog_row)
+
+        self.prog_bar = QProgressBar()
+        self.prog_bar.setRange(0, 100)
+        self.prog_bar.setFixedHeight(8)
+        self.prog_bar.setTextVisible(False)
+        pb_lay.addWidget(self.prog_bar)
+
+        self.dates_lbl = QLabel("")
+        self.dates_lbl.setStyleSheet("font-size:10px; color:#556;")
+        pb_lay.addWidget(self.dates_lbl)
+
+        lay.addWidget(self.progress_box)
+        self.progress_box.setVisible(False)
+
         # Leírás
         self.desc = QTextEdit()
         self.desc.setReadOnly(True)
-        self.desc.setMaximumHeight(100)
+        self.desc.setMaximumHeight(90)
         self.desc.setPlaceholderText("Leírás...")
         lay.addWidget(self.desc)
+
+        # ── Sorozat-nézet ──
+        self.series_box = QWidget()
+        sb_lay = QVBoxLayout(self.series_box)
+        sb_lay.setContentsMargins(0, 4, 0, 0)
+        sb_lay.setSpacing(4)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#2a2a50;")
+        sb_lay.addWidget(sep)
+
+        self.series_title = QLabel("")
+        self.series_title.setStyleSheet(
+            "font-size:11px; font-weight:bold; color:#e94560;")
+        sb_lay.addWidget(self.series_title)
+
+        ser_scroll = QScrollArea()
+        ser_scroll.setFixedHeight(82)
+        ser_scroll.setWidgetResizable(True)
+        ser_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        ser_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        ser_scroll.setStyleSheet("background:#1a1a30; border:none;")
+
+        self.series_row_w = QWidget()
+        self.series_row_w.setStyleSheet("background:transparent;")
+        self.series_row = QHBoxLayout(self.series_row_w)
+        self.series_row.setContentsMargins(4, 4, 4, 4)
+        self.series_row.setSpacing(6)
+        self.series_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        ser_scroll.setWidget(self.series_row_w)
+        sb_lay.addWidget(ser_scroll)
+
+        lay.addWidget(self.series_box)
+        self.series_box.setVisible(False)
 
     def _on_status_click(self, btn):
         if not self.current_book:
             return
-        DB.get().set_user_data(
-            self.current_book['id'],
-            statusz=btn.property('stval'))
+        val = btn.property('stval')
+        now = datetime.now().isoformat()
+        ud  = DB.get().get_user_data(self.current_book['id'])
+        kwargs = {'statusz': val}
+        if val == 'olvasom' and not ud.get('olvasas_kezdete'):
+            kwargs['olvasas_kezdete'] = now
+        elif val == 'elolvastam':
+            kwargs['olvasas_vege'] = now
+            if not ud.get('olvasas_kezdete'):
+                kwargs['olvasas_kezdete'] = now
+        DB.get().set_user_data(self.current_book['id'], **kwargs)
+        self._update_progress_box(val)
+        self._refresh_dates(DB.get().get_user_data(self.current_book['id']))
 
     def _clear_status(self):
         if not self.current_book:
@@ -1194,6 +1487,106 @@ class BookDetailPanel(QWidget):
             b.setChecked(False)
         self.st_grp.setExclusive(True)
         DB.get().set_user_data(self.current_book['id'], statusz=None)
+        self._update_progress_box(None)
+
+    def _update_progress_box(self, statusz):
+        self.progress_box.setVisible(statusz == 'olvasom')
+
+    def _save_progress(self):
+        if not self.current_book:
+            return
+        cur = self.cur_page.value()
+        tot = self.tot_page.value()
+        DB.get().set_user_data(
+            self.current_book['id'],
+            aktualis_oldal=cur if cur > 0 else None,
+            osszes_oldal=tot  if tot > 0 else None)
+        self._update_prog_bar(cur, tot)
+
+    def _update_prog_bar(self, cur: int, tot: int):
+        if tot > 0:
+            self.prog_bar.setValue(min(100, int(cur * 100 / tot)))
+        else:
+            self.prog_bar.setValue(0)
+
+    def _refresh_dates(self, ud: dict):
+        parts = []
+        if ud.get('olvasas_kezdete'):
+            parts.append(f"Elkezdve: {ud['olvasas_kezdete'][:10]}")
+        if ud.get('olvasas_vege'):
+            parts.append(f"Befejezve: {ud['olvasas_vege'][:10]}")
+        self.dates_lbl.setText("  •  ".join(parts))
+
+    def _load_series(self, current_id: int, sorozat: str):
+        rows = DB.get().query("""
+            SELECT k.id, k.cim, k.kiadas_eve,
+                   f.id as fajl_id, f.egyezes_szint,
+                   u.statusz as user_statusz
+            FROM konyvek k
+            LEFT JOIN fizikai_fajlok f ON f.konyv_id = k.id
+            LEFT JOIN felhasznalo_adatok u ON u.konyv_id = k.id
+            WHERE k.sorozat = ?
+            GROUP BY k.id
+            ORDER BY k.kiadas_eve, k.cim
+            LIMIT 24
+        """, (sorozat,))
+
+        # Törlés
+        while self.series_row.count():
+            item = self.series_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not rows:
+            self.series_box.setVisible(False)
+            return
+
+        self.series_title.setText(
+            f"📚 Sorozat: {sorozat}  ({len(rows)} kötet)")
+
+        st_icons = {
+            'olvasni_akarom': '📖',
+            'olvasom':        '📚',
+            'elolvastam':     '✅',
+        }
+        for row in rows:
+            row = dict(row)
+            is_current = (row['id'] == current_id)
+
+            item = QWidget()
+            item.setFixedWidth(108)
+            item.setStyleSheet(
+                f"background: {'#252550' if is_current else '#1a1a30'};"
+                "border-radius:5px;")
+            il = QVBoxLayout(item)
+            il.setContentsMargins(5, 5, 5, 5)
+            il.setSpacing(2)
+
+            # Cím
+            szint = row.get('egyezes_szint')
+            col   = STATUS_COL.get(szint, NO_FILE_COL) if row.get('fajl_id') else NO_FILE_COL
+            cim   = (row.get('cim') or '')[:22]
+            cim_lbl = QLabel(cim)
+            cim_lbl.setWordWrap(True)
+            cim_lbl.setFixedHeight(38)
+            bold = "font-weight:bold;" if is_current else ""
+            cim_lbl.setStyleSheet(
+                f"font-size:10px; {bold} color:#dde1ec; "
+                f"border-left:3px solid {col}; padding-left:4px;")
+            il.addWidget(cim_lbl)
+
+            # Státusz + fájl jelző
+            ev_txt = str(row['kiadas_eve']) if row.get('kiadas_eve') else ''
+            fajl_jel = '✓' if row.get('fajl_id') else '–'
+            st_icon  = st_icons.get(row.get('user_statusz', ''), '')
+            info_lbl = QLabel(f"{fajl_jel} {ev_txt}  {st_icon}")
+            info_lbl.setStyleSheet("font-size:10px; color:#778;")
+            il.addWidget(info_lbl)
+
+            self.series_row.addWidget(item)
+
+        self.series_row.addStretch()
+        self.series_box.setVisible(True)
 
     def _on_star_click(self):
         btn = self.sender()
@@ -1229,6 +1622,19 @@ class BookDetailPanel(QWidget):
         saved_stars = ud.get('sajat_ertekeles') or book.get('sajat_ertekeles') or 0
         self._set_stars(saved_stars)
 
+        # Olvasási haladás
+        self._update_progress_box(saved_st)
+        cur = ud.get('aktualis_oldal') or 0
+        tot = ud.get('osszes_oldal') or 0
+        self.cur_page.blockSignals(True)
+        self.tot_page.blockSignals(True)
+        self.cur_page.setValue(cur)
+        self.tot_page.setValue(tot)
+        self.cur_page.blockSignals(False)
+        self.tot_page.blockSignals(False)
+        self._update_prog_bar(cur, tot)
+        self._refresh_dates(ud)
+
         parts = []
         if book.get('kiado'):      parts.append(book['kiado'])
         if book.get('kiadas_eve'): parts.append(str(book['kiadas_eve']))
@@ -1249,6 +1655,13 @@ class BookDetailPanel(QWidget):
             self.file_lbl.setText("⚠️  Nincs letöltött fájl")
 
         self.desc.setPlainText(book.get('leiras') or '')
+
+        # Sorozat-nézet
+        sorozat = book.get('sorozat')
+        if sorozat and sorozat.strip():
+            self._load_series(book['id'], sorozat.strip())
+        else:
+            self.series_box.setVisible(False)
 
         # Borítókép
         self.cover_lbl.setText("📖")
